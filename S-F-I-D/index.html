@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <title>Scratch Follower Icon Downloader|S-F-I-D</title>
+    <title>SFID | Scratch Follower Icon Downloader</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <style>
         body { font-family: sans-serif; max-width: 600px; margin: 40px auto; text-align: center; background: #f0f0f0; }
@@ -17,79 +17,104 @@
 </head>
 <body>
 
-<div class="container">
-    <h2>Scratch Follower Downloader</h2>
-    <p>ユーザー名を入力してフォロワーのアイコンを一括保存</p>
+<div class="card">
+    <h1>Scratch Icons Downloader</h1>
+    <p>全フォロワーのアイコンを解析してZIPにまとめます</p>
     
-    <input type="text" id="username" placeholder="Scratchのユーザー名">
-    <button id="startBtn">ダウンロード開始</button>
-
-    <div class="progress-bar" id="progressBar">
-        <div id="progress-inner"></div>
+    <div class="input-group">
+        <input type="text" id="username" placeholder="ユーザー名を入力 (例: griffpatch)">
+        <button id="startBtn">開始</button>
     </div>
-    <div id="status"></div>
+
+    <div class="progress-container" id="progressContainer">
+        <div id="progress-bar"></div>
+    </div>
+    <div id="status">待機中...</div>
 </div>
 
 <script>
 const startBtn = document.getElementById('startBtn');
 const status = document.getElementById('status');
-const progressInner = document.getElementById('progress-inner');
-const progressBar = document.getElementById('progressBar');
+const progressBar = document.getElementById('progress-bar');
+const progressContainer = document.getElementById('progressContainer');
+
+const sleep = ms => new Promise(res => setTimeout(res, ms));
+
+// プロキシ経由のFetch
+async function fetchViaProxy(url) {
+    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
+    const response = await fetch(proxyUrl);
+    if (!response.ok) throw new Error("通信エラーが発生しました");
+    return await response.json();
+}
 
 startBtn.onclick = async () => {
     const user = document.getElementById('username').value.trim();
     if (!user) return alert('ユーザー名を入力してください');
 
+    // UI初期化
     startBtn.disabled = true;
-    progressBar.style.display = 'block';
-    status.innerText = "プロキシ経由で取得中...";
+    progressContainer.style.display = 'block';
+    progressBar.style.width = '0%';
     
     const zip = new JSZip();
-    
+    let allFollowers = [];
+    let offset = 0;
+    const limit = 40;
+
     try {
-        // AllOrigins プロキシを使用してCORSを回避
-        const apiUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(`https://api.scratch.mit.edu/users/${user}/followers?limit=40`)}`;
-        
-        const response = await fetch(apiUrl);
-        if (!response.ok) throw new Error("APIアクセスに失敗しました");
-        
-        const jsonWrapper = await response.json();
-        const followers = JSON.parse(jsonWrapper.contents); // AllOriginsは中身を文字列で返すためパースが必要
+        // --- STEP 1: リスト取得 ---
+        while (true) {
+            status.innerText = `名簿を取得中... (${offset}人目〜)`;
+            const dataWrap = await fetchViaProxy(`https://api.scratch.mit.edu/users/${user}/followers?limit=${limit}&offset=${offset}`);
+            const data = JSON.parse(dataWrap.contents);
 
-        if (followers.length === 0) throw new Error("フォロワーが見つかりませんでした");
-
-        for (let i = 0; i < followers.length; i++) {
-            const f = followers[i];
-            const percent = Math.round(((i + 1) / followers.length) * 100);
-            status.innerText = `${f.username} のアイコンを取得中... (${i + 1}/${followers.length})`;
-            progressInner.style.width = percent + '%';
-
-            // 画像もプロキシ経由で取得
-            const iconUrl = f.profile.images['90x90'];
-            const proxyImgUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(iconUrl)}`;
-            
-            try {
-                const imgRes = await fetch(proxyImgUrl);
-                const imgData = await imgRes.json();
-                
-                // base64データをBlobに変換してZIPに追加
-                const res = await fetch(imgData.contents);
-                const blob = await res.blob();
-                
-                zip.file(`${f.username}.png`, blob);
-            } catch (e) {
-                console.error(`${f.username} の画像取得に失敗`, e);
-            }
+            if (!data || data.length === 0) break;
+            allFollowers = allFollowers.concat(data);
+            offset += limit;
+            await sleep(100); // 負荷軽減
         }
 
-        status.innerText = "ZIPを生成中...";
+        if (allFollowers.length === 0) throw new Error("フォロワーが見つかりませんでした");
+
+        // --- STEP 2: 画像ダウンロード ---
+        for (let i = 0; i < allFollowers.length; i++) {
+            const f = allFollowers[i];
+            const iconUrl = f.profile.images['90x90'];
+            
+            status.innerText = `取得中 (${i + 1}/${allFollowers.length}): ${f.username}`;
+            progressBar.style.width = `${((i + 1) / allFollowers.length) * 100}%`;
+
+            try {
+                // 画像をプロキシ経由で取得（base64データが返ってくる）
+                const imgWrap = await fetchViaProxy(iconUrl);
+                const blobRes = await fetch(imgWrap.contents);
+                const blob = await blobRes.blob();
+
+                // 拡張子の判別
+                let ext = "png";
+                if (blob.type === "image/webp") ext = "webp";
+                else if (blob.type === "image/jpeg") ext = "jpg";
+                else if (blob.type === "image/gif") ext = "gif";
+
+                zip.file(`${f.username}.${ext}`, blob);
+            } catch (e) {
+                console.error(`${f.username} の取得に失敗`, e);
+            }
+
+            // 大量リクエストによるブロックを避けるための微小な待機
+            if (i % 5 === 0) await sleep(50);
+        }
+
+        // --- STEP 3: ZIP生成 ---
+        status.innerText = "ZIPファイルを生成しています...";
         const content = await zip.generateAsync({ type: "blob" });
         const link = document.createElement("a");
         link.href = URL.createObjectURL(content);
-        link.download = `${user}_followers.zip`;
+        link.download = `scratch_${user}_followers.zip`;
         link.click();
 
-        status.innerText = "完了しました！";
+        status.innerText = `完了！ ${allFollowers.length}件保存しました。`;
     } catch (err) {
         status.innerText = "エラー: " + err.message;
         console.error(err);
