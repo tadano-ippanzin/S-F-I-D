@@ -50,20 +50,6 @@
 </div>
 
 <script>
-const startBtn = document.getElementById('startBtn');
-const status = document.getElementById('status');
-const progressBar = document.getElementById('progress-bar');
-const progressContainer = document.getElementById('progressContainer');
-
-const sleep = ms => new Promise(res => setTimeout(res, ms));
-
-async function fetchViaProxy(url) {
-    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
-    const response = await fetch(proxyUrl);
-    if (!response.ok) throw new Error("プロキシサーバーとの通信に失敗しました");
-    return await response.json();
-}
-
 startBtn.onclick = async () => {
     const user = document.getElementById('username').value.trim();
     const maxCount = parseInt(document.getElementById('maxCount').value) || 40;
@@ -78,12 +64,20 @@ startBtn.onclick = async () => {
     let allFollowers = [];
     const limit = 40;
 
+    // MIMEタイプと拡張子のマッピング
+    const mimeToExt = {
+        'image/png': 'png',
+        'image/jpeg': 'jpg',
+        'image/webp': 'webp',
+        'image/gif': 'gif',
+        'image/avif': 'avif',
+        'image/svg+xml': 'svg'
+    };
+
     try {
         // --- 1. 名簿取得ループ ---
-        // offset は常に現在のリストの長さから開始するように修正
         while (allFollowers.length < maxCount) {
             status.innerText = `名簿を収集中... (${allFollowers.length} / ${maxCount})`;
-            
             const currentLimit = Math.min(limit, maxCount - allFollowers.length);
             const offset = allFollowers.length; 
             const apiUrl = `https://api.scratch.mit.edu/users/${user}/followers?limit=${currentLimit}&offset=${offset}`;
@@ -92,43 +86,54 @@ startBtn.onclick = async () => {
             const data = JSON.parse(dataWrap.contents);
 
             if (!data || !Array.isArray(data) || data.length === 0) break;
-
             allFollowers = allFollowers.concat(data);
-
             if (data.length < currentLimit) break; 
-            await sleep(300); // 連続リクエストへの安全策
+            await sleep(400); // プロキシ制限回避のため少し長めに待機
         }
 
-        if (allFollowers.length === 0) throw new Error("ユーザーが存在しないか、フォロワーが0人です");
+        if (allFollowers.length === 0) throw new Error("フォロワーが見つかりませんでした");
 
         const targets = allFollowers.slice(0, maxCount);
-        status.innerText = `${targets.length}人分のアイコンをダウンロード中...`;
+        let successCount = 0;
 
         // --- 2. 画像ダウンロード ---
         for (let i = 0; i < targets.length; i++) {
             const f = targets[i];
             const iconUrl = f.profile.images['90x90'];
             
-            status.innerText = `保存中 (${i + 1}/${targets.length}): ${f.username}`;
+            status.innerText = `保存中 (${i + 1}/${targets.length}): ${f.username}\n(成功: ${successCount}件)`;
             progressBar.style.width = `${((i + 1) / targets.length) * 100}%`;
 
-            try {
-                const imgWrap = await fetchViaProxy(iconUrl);
-                const blobRes = await fetch(imgWrap.contents);
-                const blob = await blobRes.blob();
+            let downloadedBlob = null;
+            let mimeType = "";
 
-                let ext = "png";
-                if (blob.type === "image/webp") ext = "webp";
-                else if (blob.type === "image/jpeg") ext = "jpg";
-                
-                // 【修正】連番を付与して重複上書きを回避
-                const fileName = `${String(i + 1).padStart(3, '0')}_${f.username}.${ext}`;
-                zip.file(fileName, blob);
-            } catch (e) {
-                console.warn(`${f.username} のアイコン取得をスキップしました`);
+            // 確実性を高めるためのリトライ
+            for (let retry = 0; retry < 3; retry++) {
+                try {
+                    const imgWrap = await fetchViaProxy(iconUrl);
+                    if (imgWrap && imgWrap.contents) {
+                        const blobRes = await fetch(imgWrap.contents);
+                        if (blobRes.ok) {
+                            downloadedBlob = await blobRes.blob();
+                            mimeType = downloadedBlob.type;
+                            break; 
+                        }
+                    }
+                } catch (e) { console.warn(`Retry ${retry+1}: ${f.username}`); }
+                await sleep(600 * (retry + 1)); 
             }
 
-            if (i % 5 === 0) await sleep(50);
+            if (downloadedBlob) {
+                // MIMEタイプから拡張子を決定。不明な場合はURLから取得、それもダメならpng
+                let ext = mimeToExt[mimeType] || iconUrl.split('.').pop().split(/\?|#/)[0] || 'png';
+                
+                successCount++;
+                // 番号を successCount で振ることで、ZIP内のファイル名が連番（001, 002...）になる
+                const fileName = `${String(successCount).padStart(3, '0')}_${f.username}.${ext}`;
+                zip.file(fileName, downloadedBlob);
+            }
+
+            await sleep(350); // プロキシへの連続リクエストを抑える（重要）
         }
 
         // --- 3. ZIP書き出し ---
@@ -136,10 +141,10 @@ startBtn.onclick = async () => {
         const content = await zip.generateAsync({ type: "blob" });
         const link = document.createElement("a");
         link.href = URL.createObjectURL(content);
-        link.download = `scratch_${user}_${targets.length}icons.zip`;
+        link.download = `scratch_${user}_${successCount}icons.zip`;
         link.click();
 
-        status.innerText = `完了！${targets.length}個のファイルを保存しました。`;
+        status.innerText = `完了！ ${targets.length}人中 ${successCount}人のアイコンを保存しました。`;
     } catch (err) {
         status.innerText = `エラー: ${err.message}`;
         console.error(err);
