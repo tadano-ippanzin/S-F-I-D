@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>S-F-I-D | Scratch Icons Downloader</title>
+    <title>S-F-I-D | Scratch Followers Icons Downloader</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <style>
         :root { --primary: #4D97FF; --bg: #f5f7f9; }
@@ -27,7 +27,7 @@
 <body>
 
 <div class="card">
-    <h1>Scratch Icons ZIP</h1>
+    <h1>S-F-I-D | Scratch Followers Icons Downloader</h1>
     <p style="color: #777; font-size: 0.9rem;">指定した人数のフォロワーアイコンを取得します</p>
     
     <div class="input-group">
@@ -76,33 +76,31 @@ startBtn.onclick = async () => {
     
     const zip = new JSZip();
     let allFollowers = [];
-    let offset = 0;
     const limit = 40;
 
     try {
         // --- 1. 名簿取得ループ ---
+        // offset は常に現在のリストの長さから開始するように修正
         while (allFollowers.length < maxCount) {
             status.innerText = `名簿を収集中... (${allFollowers.length} / ${maxCount})`;
             
-            // 必要な数だけリクエスト（無駄な取得を避ける）
             const currentLimit = Math.min(limit, maxCount - allFollowers.length);
+            const offset = allFollowers.length; 
             const apiUrl = `https://api.scratch.mit.edu/users/${user}/followers?limit=${currentLimit}&offset=${offset}`;
             
             const dataWrap = await fetchViaProxy(apiUrl);
             const data = JSON.parse(dataWrap.contents);
 
-            if (!data || data.length === 0) break;
+            if (!data || !Array.isArray(data) || data.length === 0) break;
 
             allFollowers = allFollowers.concat(data);
-            offset += data.length;
 
             if (data.length < currentLimit) break; 
-            await sleep(200); 
+            await sleep(300); // 連続リクエストへの安全策
         }
 
         if (allFollowers.length === 0) throw new Error("ユーザーが存在しないか、フォロワーが0人です");
 
-        // 念のため、最終的なリストを入力数でカット
         const targets = allFollowers.slice(0, maxCount);
         status.innerText = `${targets.length}人分のアイコンをダウンロード中...`;
 
@@ -119,12 +117,13 @@ startBtn.onclick = async () => {
                 const blobRes = await fetch(imgWrap.contents);
                 const blob = await blobRes.blob();
 
-                // 拡張子の自動判別
                 let ext = "png";
                 if (blob.type === "image/webp") ext = "webp";
                 else if (blob.type === "image/jpeg") ext = "jpg";
                 
-                zip.file(`${f.username}.${ext}`, blob);
+                // 【修正】連番を付与して重複上書きを回避
+                const fileName = `${String(i + 1).padStart(3, '0')}_${f.username}.${ext}`;
+                zip.file(fileName, blob);
             } catch (e) {
                 console.warn(`${f.username} のアイコン取得をスキップしました`);
             }
